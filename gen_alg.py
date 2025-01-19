@@ -52,7 +52,8 @@ class GeneticAlgorithm:
                  new_individual_ratio: float = 0.1,
                  n_jobs: int = 1,
                  crossing_operator: str = 'random',
-                 p: float = 0.5
+                 p: float = 0.5,
+                 early_stop: bool = False
                  ):
 
         """
@@ -93,6 +94,8 @@ class GeneticAlgorithm:
             'random'- the choice of a crossing operator for each new individual is made randomly.
         :param p: float:
             The probability with which the crossing operator is 'uniform', otherwise 'mean'.
+        :param early_stop: bool:
+            If true, the algorithm stops in cases where the maximum value of the fit-function has not changed significantly over a certain period of time.
         """
 
         self.gen_len = gen_len
@@ -117,7 +120,6 @@ class GeneticAlgorithm:
 
         self.max_fit = [0.0]
         self.mean_fit = [0.0]
-        self.xs = [0]
 
         self.leaders_ration = leaders_ration
         self.survivors_ratio = survivors_ratio
@@ -129,13 +131,15 @@ class GeneticAlgorithm:
         self.crossing_operator = crossing_operator
         self.p = p
 
+        self.early_stop = early_stop
+
         self.check_params()
 
     def check_params(self):
         assert self.gen_len > 0, 'gen_len < 1'
         assert self.epoch_count > 0, 'epoch_count < 1'
-        assert 0 <= self.epsilon <= 1, 'Epsilon must be > 0'
-        assert self.alpha > 0, 'Alpha must be > 0'
+        assert 0 <= self.epsilon <= 1, 'Epsilon must be in [0,1]'
+        assert self.alpha >= 0, 'Alpha must be >= 0'
         assert 0 <= self.p <= 1, 'Probability p must be in [0, 1]'
         assert self.crossing_operator in ['uniform', 'mean', 'random'],\
             'crossing_operator must take a value from the list ["uniform", "mean", "random"]'
@@ -178,28 +182,26 @@ class GeneticAlgorithm:
         # Sorting by fit function value
         self.generation.sort(key=lambda a: a[self.gen_len], reverse=True)
 
-    def uniform_crossing(self, individual_1: list, individual_2: list) -> [list, list]:
+    def uniform_crossing(self, individual_1: list, individual_2: list) -> list:
         """
         Uniform crossing operator.
         :param individual_1: list
             An individual for crossing.
         :param individual_2: list
             An individual for crossing.
-        :return: list[list, list]:
-            Children.
+        :return: list:
+            Child.
         """
 
         mask = [np.random.randint(0, 2) for _ in range(self.gen_len)]
 
         # Get children
-        child_1 = [individual_1[i] if mask[i] else individual_2[i] for i in range(self.gen_len)]
-        child_2 = [individual_1[i] if not mask[i] else individual_2[i] for i in range(self.gen_len)]
+        child = [individual_1[i] if mask[i] else individual_2[i] for i in range(self.gen_len)]
 
         # Added mutations
-        child_1 = self.get_mutation(child_1, self.epsilon)
-        child_2 = self.get_mutation(child_2, self.epsilon)
+        child = self.get_mutation(child, self.epsilon)
 
-        return child_1, child_2
+        return child
 
     @staticmethod
     def is_numeric(obj):
@@ -291,7 +293,7 @@ class GeneticAlgorithm:
             while self.result_calculating.qsize() < tasks_count:
                 continue
 
-            while not self.result_calculating.empty():
+            for _ in range(tasks_count):
                 result.append(self.result_calculating.get())
 
         return result
@@ -313,16 +315,12 @@ class GeneticAlgorithm:
                 replace=False
             )
             if self.crossing_operator == 'uniform' or (self.crossing_operator == 'random' and np.random.rand() < self.p):
-                children = self.uniform_crossing(self.generation[parents[0]], self.generation[parents[1]])
-
-                self.individuals_for_calculating.put(children[0])
-                self.individuals_for_calculating.put(children[1])
-                new_individuals_count += 2
+                child = self.uniform_crossing(self.generation[parents[0]], self.generation[parents[1]])
 
             else:
                 child = self.mean_crossing(self.generation[parents[0]], self.generation[parents[1]])
-                self.individuals_for_calculating.put(child)
-                new_individuals_count += 1
+            self.individuals_for_calculating.put(child)
+            new_individuals_count += 1
 
         return self.wait_result(new_individuals_count)
 
@@ -349,9 +347,10 @@ class GeneticAlgorithm:
         self.mean_fit.append(fmean([individual[self.gen_len] for individual in self.generation]))
 
     def stopping_criteria(self) -> bool:
-        if abs(self.max_fit[-1] - self.mean_fit[-1]) < 0.001:
+        if abs(self.max_fit[-1] - self.mean_fit[-1]) / self.mean_fit[-1] < 0.001:
             return True
-        if self.current_generation > 30 and abs(self.max_fit[-1] - fmean(self.max_fit[-30:])) < 0.001:
+
+        if self.early_stop and self.current_generation > 50 and abs(self.max_fit[-1] - fmean(self.max_fit[-30:])) / fmean(self.max_fit[-30:]) < 0.001:
             return True
         return False
 
@@ -400,23 +399,29 @@ class GeneticAlgorithm:
     def start(self):
         self.create_jobs()
 
-        self.fill_generation()
+        try:
 
-        for i in range(self.epoch_count):
-            s = time.time()
+            self.fill_generation()
 
-            self.create_new_generation()
+            for i in range(self.epoch_count):
+                s = time.time()
 
-            self.update()
+                self.create_new_generation()
 
-            print(
-                f'epoch {i}\t mean: {self.mean_fit[-1]}\t '
-                f'max: {self.max_fit[-1]}\t '
-                f'leader: {self.generation[0][:self.gen_len]}\t '
-                f'time: {str(time.time() - s)[:4]}'
-            )
+                self.update()
 
-            if self.stopping_criteria():
-                break
+                print(
+                    f'epoch {i}\t mean: {self.mean_fit[-1]}\t '
+                    f'max: {self.max_fit[-1]}\t '
+                    f'leader: {self.generation[0][:self.gen_len]}\t '
+                    f'time: {str(time.time() - s)[:4]}'
+                )
+
+                if self.stopping_criteria():
+                    break
+
+        except GenerationException:
+            print('It is impossible to fill in a new generation. '
+                  'Reduce alpha or reduce the number of individuals or check the method of creating new individuals')
 
         self.kill_jobs()
